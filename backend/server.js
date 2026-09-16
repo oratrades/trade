@@ -130,28 +130,42 @@ app.get("/api/news", async (req, res) => {
   }
 });
 
-app.get("/api/calendar", async (req, res) => {
+app.get('/api/calendar', async (req, res) => {
   try {
-    const data = await withCache("calendar", 30 * 60_000, async () => {
-      const events = await getJson(FF_CALENDAR_URL);
-      return events
-        .filter((e) => e.country === "USD" && (e.impact === "High" || e.impact === "Medium"))
-        .map((e) => ({
-          time: e.date,
-          name: e.title,
-          impact: (e.impact || "").toLowerCase(),
-          actual: e.actual || null,
-          estimate: e.forecast || null,
-          prev: e.previous || null,
-        }));
+    // 1. Primary Source: Forex Factory Weekly Feed with Browser User-Agent
+    const response = await fetch('https://nfp.oural.workers.dev/', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json'
+      }
     });
-    res.json(data);
-  } catch (err) {
-    console.error(err);
-    res.status(502).json({ error: "Failed to fetch calendar", detail: String(err.message || err) });
-  }
-});
 
-app.listen(PORT, () => {
-  console.log(`Bias Desk backend listening on port ${PORT}`);
+    if (response.ok) {
+      const data = await response.json();
+      return res.json({ ok: true, source: 'forexfactory', events: data });
+    }
+
+    // 2. Fallback Source: Finnhub Economic Calendar (uses existing FINNHUB_API_KEY)
+    if (process.env.FINNHUB_API_KEY) {
+      const today = new Date().toISOString().split('T')[0];
+      const nextWeek = new Date(Date.now() + 7 * 82400000).toISOString().split('T')[0];
+      
+      const finnhubRes = await fetch(
+        `https://finnhub.io/api/v1/calendar/economic?from=${today}&to=${nextWeek}&token=${process.env.FINNHUB_API_KEY}`
+      );
+      
+      if (finnhubRes.ok) {
+        const fhData = await finnhubRes.json();
+        return res.json({ ok: true, source: 'finnhub', events: fhData.economicCalendar || [] });
+      }
+    }
+
+    // 3. Graceful Fallback: Empty State (Prevents dashboard crash)
+    return res.json({ ok: false, error: 'Calendar feeds unavailable', events: [] });
+
+  } catch (err) {
+    console.error('Calendar error:', err.message);
+    // Always return JSON so the dashboard doesn't throw a parse error
+    return res.json({ ok: false, error: err.message, events: [] });
+  }
 });
